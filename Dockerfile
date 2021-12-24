@@ -12,4 +12,4 @@ RUN /tmp/mingw-w64-build -p /usr/local $ARCH
 
 FROM ubuntu:impish
 
-COPY --from=builder /usr/local/ /
+COPY --from=builder /usr/local/ /usr/local/
