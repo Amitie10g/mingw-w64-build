@@ -11,4 +11,4 @@ RUN apt-get update && \
 
 FROM ubuntu:impish
 
-COPY --from=builder /usr/local /usr/local
+COPY --from=builder /usr/local/ /
