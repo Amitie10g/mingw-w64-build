@@ -15,6 +15,8 @@ FROM ubuntu:impish
 COPY --from=builder /usr/local/ /usr/local/
 
 RUN apt-get update && \
-    apt-get -y install make && \
+    apt-get --no-install-recommends -y install make && \
+    apt-get clean && apt-get autoclean && apt-get autoremove && \
+    rm -rf /var/lib/apt/lists/* && \
     update-alternatives --install /usr/bin/gcc gcc /usr/local/bin/x86_64-w64-mingw32-gcc 20 && \
     update-alternatives --install /usr/bin/g++ g++ /usr/local/bin/x86_64-w64-mingw32-g++ 20
