@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright (C) 2021 Kyle Schwarz <zeranoe@gmail.com>
+# Copyright (C) 2023 Kyle Schwarz <zeranoe@gmail.com>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -18,13 +18,15 @@
 
 ROOT_PATH="$HOME/.zeranoe/mingw-w64"
 
-MINGW_W64_BRANCH="v9.x"
-BINUTILS_BRANCH="binutils-2_37-branch"
-GCC_BRANCH="releases/gcc-11"
+MINGW_W64_BRANCH="master"
+BINUTILS_BRANCH="binutils-2_40-branch"
+GCC_BRANCH="releases/gcc-12"
 
 ENABLE_THREADS="--enable-threads=posix"
 
 JOB_COUNT=$(($(getconf _NPROCESSORS_ONLN) + 2))
+
+LINKED_RUNTIME="msvcrt"
 
 show_help()
 {
@@ -33,7 +35,8 @@ Usage:
   $0 [options] <arch>...
 
 Archs:
-  i686    Windows 32-bit
+  i586    Windows 32-bit for old CPUs (Intel Pentium (MMX), AMD K5, K6, K6-2, K6-III)
+  i686    Windows 32-bit (Intel P6 [Pentium Pro], AMD K7 and newer)
   x86_64  Windows 64-bit
 
 Options:
@@ -47,6 +50,7 @@ Options:
   --binutils-branch <branch>   set Binutils branch (default: $BINUTILS_BRANCH)
   --gcc-branch <branch>        set GCC branch (default: $GCC_BRANCH)
   --mingw-w64-branch <branch>  set MinGW-w64 branch (default: $MINGW_W64_BRANCH)
+  --linked-runtime <runtime>   set MinGW Linked Runtime (default: $LINKED_RUNTIME)
 EOF
 }
 
@@ -85,7 +89,7 @@ execute()
         printf "(%d/%d): %s\n" "$CURRENT_STEP" "$TOTAL_STEPS" "$info_msg"
         CURRENT_STEP=$((CURRENT_STEP + 1))
     fi
-    $@ >>"$LOG_FILE" 2>&1 || error_exit "$error_msg, check $LOG_FILE for details"
+    "$@" >>"$LOG_FILE" 2>&1 || error_exit "$error_msg, check $LOG_FILE for details"
 }
 
 create_dir()
@@ -155,10 +159,11 @@ build()
         remove_path "$prefix"
     fi
 
-    if [ "$arch" = "i686" ]; then
-        local i686_dwarf2="--disable-sjlj-exceptions --with-dwarf2"
+    if [ "$arch" = "i586" ] || [ "$arch" = "i686" ]; then
+        local x86_dwarf2="--disable-sjlj-exceptions --with-dwarf2"
         local crt_lib="--enable-lib32 --disable-lib64"
     else
+        local x86_dwarf2=""
         local crt_lib="--enable-lib64 --disable-lib32"
     fi
 
@@ -181,7 +186,8 @@ build()
 
     execute "($arch): configuring MinGW-w64 headers" "" \
         "$SRC_PATH/mingw-w64/mingw-w64-headers/configure" --build="$BUILD" \
-            --host="$host" --prefix="$prefix/$host"
+            --host="$host" --prefix="$prefix/$host" \
+            --with-default-msvcrt=$LINKED_RUNTIME
 
     execute "($arch): installing MinGW-w64 headers" "" \
         make install
@@ -193,7 +199,7 @@ build()
         "$SRC_PATH/gcc/configure" --target="$host" --disable-shared \
             --enable-static --disable-multilib --prefix="$prefix" \
             --enable-languages=c,c++ --disable-nls $ENABLE_THREADS \
-            $i686_dwarf2
+            $x86_dwarf2
 
     execute "($arch): building GCC (all-gcc)" "" \
         make -j $JOB_COUNT all-gcc
@@ -206,6 +212,7 @@ build()
     execute "($arch): configuring MinGW-w64 CRT" "" \
         "$SRC_PATH/mingw-w64/mingw-w64-crt/configure" --build="$BUILD" \
             --host="$host" --prefix="$prefix/$host" \
+            --with-default-msvcrt=$LINKED_RUNTIME \
             --with-sysroot="$prefix/$host" $crt_lib
 
     execute "($arch): building MinGW-w64 CRT" "" \
@@ -267,14 +274,14 @@ while :; do
             ;;
         -r|--root)
             if [ "$2" ]; then
-                ROOT_PATH=$(realpath "$2")
+                ROOT_PATH_ARG="$2"
                 shift
             else
                 arg_error "'--root' requires a non-empty option argument"
             fi
             ;;
         --root=?*)
-            ROOT_PATH=$(realpath "${1#*=}")
+            ROOT_PATH_ARG="${1#*=}"
             ;;
         --root=)
             arg_error "'--root' requires a non-empty option argument"
@@ -316,6 +323,20 @@ while :; do
         --gcc-branch=)
             arg_error "'--gcc-branch' requires a non-empty option argument"
             ;;
+        --linked-runtime)
+            if [ "$2" ]; then
+                LINKED_RUNTIME="$2"
+                shift
+            else
+                arg_error "'--linked-runtime' requires a non-empty option argument"
+            fi
+            ;;
+        --linked-runtime=?*)
+            LINKED_RUNTIME=${1#*=}
+            ;;
+        --linked-runtime=)
+            arg_error "'--linked-runtime' requires a non-empty option argument"
+            ;;
         --mingw-w64-branch)
             if [ "$2" ]; then
                 MINGW_W64_BRANCH="$2"
@@ -329,6 +350,9 @@ while :; do
             ;;
         --mingw-w64-branch=)
             arg_error "'--mingw-w64-branch' requires a non-empty option argument"
+            ;;
+        i586)
+            BUILD_I586=1
             ;;
         i686)
             BUILD_I686=1
@@ -353,13 +377,8 @@ while :; do
     shift
 done
 
-SRC_PATH="$ROOT_PATH/src"
-BLD_PATH="$ROOT_PATH/bld"
-LOG_FILE="$ROOT_PATH/build.log"
-I686_PREFIX="$ROOT_PATH/i686"
-X86_64_PREFIX="$ROOT_PATH/x86_64"
-
-if [ ! "$BUILD_I686" ] && [ ! "$BUILD_X86_64" ]; then
+NUM_BUILDS=$((BUILD_I586 + BUILD_I686 + BUILD_X86_64))
+if [ "$NUM_BUILDS" -eq 0 ]; then
     arg_error "no ARCH was specified"
 fi
 
@@ -389,18 +408,27 @@ else
     THREADS_STEPS=0
 fi
 
-if [ "$BUILD_I686" ] && [ "$BUILD_X86_64" ]; then
-    THREADS_STEPS=$((THREADS_STEPS * 2))
-    BUILD_STEPS=26
-else
-    BUILD_STEPS=13
-fi
+THREADS_STEPS=$((THREADS_STEPS * NUM_BUILDS))
+BUILD_STEPS=$((13 * NUM_BUILDS))
 
 TOTAL_STEPS=$((TOTAL_STEPS + THREADS_STEPS + BUILD_STEPS))
 
+if [ "$ROOT_PATH_ARG" ]; then
+    ROOT_PATH=$(mkdir -p "$ROOT_PATH_ARG" && cd "$ROOT_PATH_ARG" && pwd)
+fi
+
+SRC_PATH="$ROOT_PATH/src"
+BLD_PATH="$ROOT_PATH/bld"
+LOG_FILE="$ROOT_PATH/build.log"
+
 if [ "$PREFIX" ]; then
+    I586_PREFIX="$PREFIX"
     I686_PREFIX="$PREFIX"
     X86_64_PREFIX="$PREFIX"
+else
+    I586_PREFIX="$ROOT_PATH/i586"
+    I686_PREFIX="$ROOT_PATH/i686"
+    X86_64_PREFIX="$ROOT_PATH/x86_64"
 fi
 
 CURRENT_STEP=1
@@ -421,26 +449,30 @@ change_dir "$SRC_PATH/gcc"
 execute "" "failed to download GCC dependencies" \
     ./contrib/download_prerequisites
 
+for i in mpc isl mpfr gmp; do
+    ln -s "$SRC_PATH/gcc/$i" "$SRC_PATH/binutils/$i"
+done
+
 export CFLAGS="-g0"
 export CXXFLAGS="-g0"
 export LDFLAGS="-s"
 
-COMPLETE_MSG="complete, to use MinGW-w64 everywhere add"
+ADD_TO_PATH=()
+
+if [ "$BUILD_I586" ]; then
+    build i586 "$I586_PREFIX"
+    ADD_TO_PATH+=("'$I586_PREFIX/bin'")
+fi
 
 if [ "$BUILD_I686" ]; then
     build i686 "$I686_PREFIX"
-    COMPLETE_MSG="$COMPLETE_MSG '$I686_PREFIX/bin'"
+    ADD_TO_PATH+=("'$I686_PREFIX/bin'")
 fi
 
 if [ "$BUILD_X86_64" ]; then
     build x86_64 "$X86_64_PREFIX"
-    if [ "$BUILD_I686" ]; then
-        COMPLETE_MSG="$COMPLETE_MSG and "
-    fi
-    COMPLETE_MSG="$COMPLETE_MSG '$X86_64_PREFIX/bin'"
+    ADD_TO_PATH+=("'$X86_64_PREFIX/bin'")
 fi
-
-COMPLETE_MSG="$COMPLETE_MSG to PATH."
 
 if [ ! "$KEEP_ARTIFACTS" ]; then
     remove_path "$SRC_PATH"
@@ -448,6 +480,9 @@ if [ ! "$KEEP_ARTIFACTS" ]; then
     remove_path "$LOG_FILE"
 fi
 
-printf "%s\n" "$COMPLETE_MSG"
+echo "complete, to use MinGW-w64 everywhere add these to your \$PATH:"
+for add_to_path in "${ADD_TO_PATH[@]}"; do
+    printf "\t%s\n" "$add_to_path"
+done
 
 exit 0
